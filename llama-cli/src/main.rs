@@ -5,9 +5,25 @@ use cli_args::Args;
 use color_eyre::eyre::{Context, Result};
 use llama_rs::{convert::convert_pth_to_ggml, InferenceError};
 use rustyline::error::ReadlineError;
+use rustyline::history::DefaultHistory;
+use rustyline::validate::{ValidationContext, ValidationResult, Validator};
+use rustyline::{Completer, Config, Editor, Helper, Highlighter, Hinter};
 
 mod cli_args;
 mod snapshot;
+
+#[derive(Completer, Hinter, Helper, Highlighter)]
+struct MultilineValidator;
+
+impl Validator for MultilineValidator {
+    fn validate(&self, ctx: &mut ValidationContext) -> rustyline::Result<ValidationResult> {
+        if ctx.input().ends_with('\\') {
+            Ok(ValidationResult::Incomplete)
+        } else {
+            Ok(ValidationResult::Valid(None))
+        }
+    }
+}
 
 fn main() -> Result<()> {
     env_logger::builder()
@@ -106,12 +122,7 @@ fn dump_tokens(args: &cli_args::DumpTokens) -> Result<()> {
     Ok(())
 }
 
-fn interactive(
-    args: &cli_args::Repl,
-    // If set to false, the session will be cloned after each inference
-    // to ensure that previous state is not carried over.
-    chat_mode: bool,
-) -> Result<()> {
+fn interactive(args: &cli_args::Repl, chat_mode: bool) -> Result<()> {
     let prompt_file = args.prompt_file.contents();
     let inference_session_params = args.generate.inference_session_parameters();
     let model = args.model_load.load()?;
@@ -124,7 +135,15 @@ fn interactive(
     let inference_params = args.generate.inference_parameters(session_loaded);
 
     let mut rng = args.generate.rng();
-    let mut rl = rustyline::DefaultEditor::new()?;
+
+    let config = Config::builder()
+        .auto_add_history(true)
+        .history_ignore_space(true)
+        .build();
+
+    let mut rl = Editor::<MultilineValidator, DefaultHistory>::with_config(config)?;
+    rl.set_helper(Some(MultilineValidator));
+
     loop {
         let readline = rl.readline(">> ");
         match readline {
@@ -138,7 +157,10 @@ fn interactive(
                 let prompt = prompt_file
                     .as_deref()
                     .map(|pf| process_prompt(pf, &line))
-                    .unwrap_or(line);
+                    .unwrap_or(line)
+                    .replace("\\\n", "\n");
+
+                log::debug!("Prompt: {:?}", prompt);
 
                 let mut sp = spinners::Spinner::new(spinners::Spinners::Dots2, "".to_string());
                 if let Err(InferenceError::ContextFull) = session.feed_prompt::<Infallible>(
